@@ -35,6 +35,7 @@ AsyncWebServer server(80);
 DS3231 rtc;
 
 #define LED               (GPIO_NUM_2)
+
 #define I2S_BCK_IO        (GPIO_NUM_35)
 #define I2S_WS_IO         (GPIO_NUM_32)
 #define I2S_DO_IO         (-1)
@@ -43,6 +44,12 @@ DS3231 rtc;
 #define SCL_1             (GPIO_NUM_22)
 #define ADC_CHANNEL       (ADC1_CHANNEL_7)
 #define THRESHOLD         (DAC_CHANNEL_1)
+#define RTC_RST           (GPIO_NUM_23)
+#define POT_INC           (GPIO_NUM_19)
+#define CS_POT            (GPIO_NUM_18)
+#define POT_UD            (GPIO_NUM_5)
+#define EN_SQW            (GPIO_NUM_4)
+#define PWM               (GPIO_NUM_27)
 
 // I2C parameters
 #define I2C_FREQ  250000
@@ -82,6 +89,8 @@ bool data_first;
 // settings variables
 static float bph;
 static uint32_t rate;
+static uint8_t gain;
+static uint8_t gain_set;
 
 // reporting ticks
 uint64_t last_report;
@@ -177,11 +186,12 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
     if (settingsTopic.str().compare(topic) == 0) {
       bph = doc["bph"];
       rate = doc["rate"];
+      gain = doc["gain"];
       uint16_t dac_value = doc["threshold"];
 
       dac_output_voltage(THRESHOLD, (uint8_t)(dac_value & 0x00ff));
 
-      printf("onMqttMessage() : bph : %f, rate : %u, threshold : %u\n", bph, rate, dac_value);
+      printf("onMqttMessage() : bph : %f, rate : %u, threshold : %u, gain : %u\n", bph, rate, dac_value, gain);
     }
   }
 }
@@ -207,31 +217,15 @@ void do_init() {
 
   ss << "{";
 
-  ss << "\"ip\":\"" << WiFi.localIP().toString().c_str() << "\",\"ports\":{";
+  ss << "\"ip\":\"" << WiFi.localIP().toString().c_str() << "\",\"ids\":[";
 
-  bool firstPort = true;
-  for (int port=0 ; port < 2 ; port++) {
-    if (!firstPort) {
-      ss << ",";
+  for (int ix=1 ; ix < 127 ; ix++) {
+    i2c_port_1.beginTransmission(ix);
+    if (i2c_port_1.endTransmission() == (uint8_t)0) {
+      ss << "\"0x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex << ix << "\"";
     }
-
-    ss << "\"" << port << "\":[";
-    bool first = true;
-    for (int ix=1 ; ix < 127 ; ix++) {
-      i2c_port_1.beginTransmission(ix);
-      if (i2c_port_1.endTransmission() == (uint8_t)0) {
-        if (!first) {
-          ss << ",";
-        }
-        ss << "\"0x" << std::uppercase << std::setfill('0') << std::setw(2) << std::hex << ix << "\"";
-        first = false;
-      }
-    }
-    ss << "]";
-    firstPort = false;
   }
-
-  ss << "}}";
+  ss << "]}";
 
   string s = ss.str();
   stringstream topic;
@@ -261,7 +255,7 @@ void do_init() {
 * 0x80000000 -> 0
 * 0x00000001 -> 31
 *
-* Do not calll this function with a value of zero!
+* Do not call this function with a value of zero!
 */
 
 int64_t find_msb(uint32_t val) {
@@ -396,10 +390,58 @@ void do_reading() {
   }
 }
 
+void update_gain() {
+  if (gain > gain_set) {
+    digitalWrite(POT_UD, HIGH);
+
+    if (gain_set < 99) {
+      gain_set++;
+    } else {
+      gain_set = 99;
+    }
+  } else {
+    digitalWrite(POT_UD, LOW);
+
+    if (gain_set > 0) {
+      gain_set--;
+    }
+  }
+
+  digitalWrite(CS_POT, LOW);
+  digitalWrite(POT_INC, LOW);
+  delayMicroseconds(10);
+  digitalWrite(POT_INC, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(CS_POT, HIGH);
+}
+
 void setup() {
   delay(1000);
-  i2c_port_1.begin(SDA_1, SCL_1, I2C_FREQ); 
+
+  i2c_port_1.begin(SDA_1, SCL_1, I2C_FREQ);
+
   pinMode(LED, OUTPUT);
+  pinMode(EN_SQW, OUTPUT);
+  pinMode(PWM, OUTPUT);
+  pinMode(POT_INC, OUTPUT);
+  pinMode(CS_POT, OUTPUT);
+  pinMode(POT_UD, OUTPUT);
+
+  digitalWrite(EN_SQW, HIGH);
+  digitalWrite(PWM, HIGH);
+  digitalWrite(CS_POT, HIGH);
+  digitalWrite(POT_INC, HIGH);
+  digitalWrite(CS_POT, LOW);
+  digitalWrite(POT_UD, HIGH);
+
+  gain = 0;
+  gain_set =255;
+
+  while (gain_set > 0) {
+    update_gain();
+  }
+
+  gain = 99;
 
   Serial.begin(115200);
 
@@ -441,31 +483,15 @@ void setup() {
   i2s_set_pin(I2S_NUM, &pin_config);
 
   dac_output_enable(THRESHOLD);
-  // adcAttachPin(35);
-  // analogSetPinAttenuation(35,ADC_11db);
-  // analogReadResolution(12);
-// while (true) {
-//   for (uint16_t dac_value=15 ; dac_value < 256 ; dac_value += 16) {
-//     dac_output_voltage(THRESHOLD, (uint8_t)(dac_value & 0x00ff));
-
-//     delayMicroseconds(100);
-
-//     // adcStart(35);
-
-//     // while (adcBusy(35));
-
-//     // int adc_value = adcEnd(35); //0.0;  // analogRead(35);
-//     int adc_value = 0.0;  // analogRead(35);
-
-//     printf("DAC : %u, ADC : %d\n", dac_value, adc_value);
-//     delayMicroseconds(5000000);
-//   }
-// }
 
   printf("setup() - Finished\n");
 }
 
 void loop() {
+  if (gain != gain_set) {
+    update_gain();
+  }
+
   switch (state) {
     case INIT:
       do_init();
@@ -473,20 +499,5 @@ void loop() {
     case READING:
       do_reading();
       break;
-    // case FILLING:
-    //   do_filling();
-    //   break;
-    // case SEND_RAW:
-    //   do_send_raw();
-    //   break;
-    // case ANALYSE:
-    //   do_analyse();
-    //   break;
-    // case SENDING:
-    //   do_sending();
-    //   break;
-    // case RESETTING:
-    //   do_resetting();
-    //   break;
   }
 }
