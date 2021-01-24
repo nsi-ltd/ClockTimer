@@ -71,6 +71,8 @@ static const i2s_channel_t i2s_channels = I2S_CHANNEL_STEREO;
 #define TOCK              (1 - TICK)
 
 static uint64_t sample_count;
+static uint64_t pulse_start;
+static uint32_t pulse_width;
 static uint64_t previous_count;
 SimpleKalmanFilter bph_kalman(2, 2, 0.001);
 static float    filtered_bph;
@@ -80,7 +82,7 @@ static float    filtered_beat_error;
 static uint64_t tock_count;
 static uint32_t sdata[BUFFER_DEPTH];
 static uint32_t last_word;
-static uint     tick_tock;
+static uint32_t tick_tock;
 
 // data buffer
 stringstream data_report;
@@ -261,12 +263,12 @@ void do_init() {
 int64_t find_msb(uint32_t val) {
   int64_t retval = 0;
 
-  if (val > 0xffff) {
+  if (val <= 0xffff) {
     retval = 16;
-    val >>= 16;
+    val <<= 16;
   }
 
-  while (val < 0x8000) {
+  while (val < 0x80000000) {
     retval++;
     val <<= 1;
   }
@@ -274,7 +276,7 @@ int64_t find_msb(uint32_t val) {
   return retval;
 }
 
-void post_reading(uint64_t reading) {
+void post_reading(uint64_t reading, uint32_t width) {
   tick_tock = 1 - tick_tock;
   float instant_bph = 0.0;
 
@@ -314,16 +316,22 @@ void post_reading(uint64_t reading) {
       << "\",\"RAW\":\"" << instant_bph
       << "\",\"BeatError\":\"" << filtered_beat_error
       << "\",\"RawError\":\"" << instant_beat_error
-      << "\",\"Ticks\":[" << reading;
+      << "\",\"Ticks\":[{"
+      << "\"T\":\"" << reading 
+      << "\",\"W\":\"" << width
+      << "\"}";
   } else {
-    data_report << "," << reading;
+    data_report << "," << "{"
+      << "\"T\":\"" << reading 
+      << "\",\"W\":\"" << width
+      << "\"}";
 
     if (reading >= next_report) {
       // time to call home
       data_report << "]}";
 
       string s = data_report.str();
-      printf("[%s]\n", s.substr(0,40).c_str());
+      // printf("[%s]\n", s.substr(0,40).c_str());
 
       uint16_t ret = mqttClient.publish(dataTopic.str().c_str(), MQTT_QOS, true, s.c_str());
 
@@ -347,45 +355,78 @@ void do_reading() {
     // process [ix+1] before [ix]
 
     for (size_t ix=0 ; ix < word_count ; ix+=2) {
-      uint32_t temp = sdata[ix+1];
+      size_t offset = 1;
 
-      if (temp) {
-        // only process non-zero words
-        uint64_t pos = find_msb(temp);
+      do {
+        uint32_t temp = sdata[ix+offset];
 
-        if (last_word & 1) {
-          // ended on a high
+        if (temp != 0) {
+          // only process non-zero words
+          if (pulse_width == 0) {
+            // start of pulse in this sample
+            uint64_t pos = find_msb(temp);
+
+            pulse_start = sample_count + pos;
+            pulse_width = 32 - pos;
+          } else if (temp == 0xffffffff) {
+            // whole word continuation
+            pulse_width += 32;
+          } else {
+            // look for end of pulse
+            uint32_t pos2 = find_msb(temp ^ 0xffffffff);
+            pulse_width += pos2;
+          }
+
+          digitalWrite (LED, HIGH);
         } else {
-          // ended on a low
-          // printf("do_reading() : %llu\n", sample_count + pos);
-          post_reading(sample_count + pos);
+          // assume gaps between pulses have at least one full sample empty
+          digitalWrite (LED, LOW);
+
+          if (pulse_width > 0) {
+            post_reading(pulse_start, pulse_width);
+            printf("do_reading() : %llu - %lu\n", pulse_start, pulse_width);
+            pulse_width = 0;
+          }
         }
 
-        digitalWrite (LED, HIGH);
-      } else {
-        digitalWrite (LED, LOW);
-      }
+        last_word = temp;
+        sample_count += BUFFER_BITS;
+      } while (offset--);
 
-      last_word = temp;
-      sample_count += BUFFER_BITS;
 
-      temp = sdata[ix];
+      // temp = sdata[ix];
 
-      if (temp) {
-        // only process non-zero words
-        uint64_t pos = find_msb(temp);
+      // if (temp) {
+      //   // only process non-zero words
+      //   if (pulse_width == 0) {
+      //     uint64_t pos = find_msb(temp);
 
-        if (last_word & 1) {
-          // ended on a high
-        } else {
-          // ended on a low
-          // printf("do_reading() : %llu\n", sample_count + pos);
-          post_reading(sample_count + pos);
-        }
-      }
+      //     if (last_word & 1) {
+      //       // ended on a high
+      //     } else {
+      //       // ended on a low
+      //       // printf("do_reading() : %llu\n", sample_count + pos);
+      //       post_reading(sample_count + pos);
+      //       pulse_width = 32 - pos;
+      //     }
+      //   } else if (temp == 0xffffffff) {
+      //     // whole word continuation
+      //     pulse_width += 32;
+      //   } else {
+      //     // look for end of pulse
+      //     uint32_t pos2 = find_msb(temp ^ 0xffffffff);
+      //     pulse_width += pos2;
+      //     printf("do_reading() : %u\n", pulse_width);
+      //     pulse_width = 0;
+      //   }
 
-      last_word = temp;
-      sample_count += BUFFER_BITS;
+      //   digitalWrite (LED, HIGH);
+      // } else {
+      //   digitalWrite (LED, LOW);
+      // }
+
+      // last_word = temp;
+      // sample_count += BUFFER_BITS;
     }
   }
 }
@@ -483,6 +524,8 @@ void setup() {
   i2s_set_pin(I2S_NUM, &pin_config);
 
   dac_output_enable(THRESHOLD);
+
+  pulse_width = 0;
 
   printf("setup() - Finished\n");
 }
