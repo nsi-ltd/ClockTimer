@@ -14,17 +14,17 @@
 #include <iomanip>
 
 #include "ds3231.h"
+#include "connection.h"
 
 using namespace std;
 
 // comms parameters
-#define WIFI_SSID "nsi-ltd-n"
-#define WIFI_PASSWORD "B718F140C3"
+#define WIFI_SSID CONFIG_WIFI_SSID
+#define WIFI_PASSWORD CONFIG_WIFI_PASSWORD
 
-//#define MQTT_HOST IPAddress(192, 168, 2, 195)
-#define MQTT_HOST "nsilimited.co.uk"
-#define MQTT_PORT 21883
-#define MQTT_QOS 2
+#define MQTT_HOST CONFIG_MQTT_HOST
+#define MQTT_PORT CONFIG_MQTT_PORT
+#define MQTT_QOS CONFIG_MQTT_QOS
 
 AsyncMqttClient mqttClient;
 TimerHandle_t mqttReconnectTimer;
@@ -35,6 +35,7 @@ AsyncWebServer server(80);
 DS3231 rtc;
 
 #define LED               (GPIO_NUM_2)
+#define LED2               (GPIO_NUM_12)
 
 #define I2S_BCK_IO        (GPIO_NUM_35)
 #define I2S_WS_IO         (GPIO_NUM_32)
@@ -93,6 +94,7 @@ static float bph;
 static uint32_t rate;
 static uint8_t gain;
 static uint8_t gain_set;
+static bool led_enabled;
 
 // reporting ticks
 uint64_t last_report;
@@ -190,10 +192,13 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
       rate = doc["rate"];
       gain = doc["gain"];
       uint16_t dac_value = doc["threshold"];
+      uint16_t led_value = doc["led"];
+      led_enabled = (led_value > 0) ? true : false;
 
       dac_output_voltage(THRESHOLD, (uint8_t)(dac_value & 0x00ff));
 
-      printf("onMqttMessage() : bph : %f, rate : %u, threshold : %u, gain : %u\n", bph, rate, dac_value, gain);
+      printf("onMqttMessage() : bph : %f, rate : %u, threshold : %u, gain : %u, led [%u] : %s\n",
+        bph, rate, dac_value, gain, led_value, (led_enabled) ? "Enabled" : "Disabled");
     }
   }
 }
@@ -378,9 +383,11 @@ void do_reading() {
           }
 
           digitalWrite (LED, HIGH);
+          digitalWrite (LED2, (led_enabled) ? HIGH : LOW);
         } else {
           // assume gaps between pulses have at least one full sample empty
           digitalWrite (LED, LOW);
+          digitalWrite (LED2, LOW);
 
           if (pulse_width > 0) {
             post_reading(pulse_start, pulse_width);
@@ -462,6 +469,7 @@ void setup() {
   i2c_port_1.begin(SDA_1, SCL_1, I2C_FREQ);
 
   pinMode(LED, OUTPUT);
+  pinMode(LED2, OUTPUT);
   pinMode(EN_SQW, OUTPUT);
   pinMode(PWM, OUTPUT);
   pinMode(POT_INC, OUTPUT);
@@ -483,6 +491,7 @@ void setup() {
   }
 
   gain = 99;
+  led_enabled = true;
 
   Serial.begin(115200);
 
